@@ -257,7 +257,7 @@ async def handle_message(message: types.Message):
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
-                text=f"📤 Отправляю файл ({format_filesize(filesize)})..."
+                text=f"📤 Отправляю файл ({escape_markdown_v2(format_filesize(filesize))})..."
             )
             
             with open(filepath, 'rb') as video_file:
@@ -265,7 +265,8 @@ async def handle_message(message: types.Message):
                     chat_id=chat_id,
                     document=video_file,
                     filename=os.path.basename(filepath),
-                    caption=f"🎬 {escape_markdown_v2(video_info.get('title', 'video'))}"
+                    caption=f"🎬 {escape_markdown_v2(video_info.get('title', 'video'))}",
+                    parse_mode=ParseMode.MARKDOWN_V2
                 )
             
             cleanup_files(filepath)
@@ -284,7 +285,7 @@ async def handle_message(message: types.Message):
                 message_id=status_msg_id,
                 text=(
                     f"⚠️ *Файл слишком большой*\n\n"
-                    f"📁 Размер: {format_filesize(filesize)}\n"
+                    f"📁 Размер: {escape_markdown_v2(format_filesize(filesize))}\n"
                     f"📏 Будет разделен на ~{math.ceil(filesize / CHUNK_SIZE)} частей\n\n"
                     f"Разделить файл на части?"
                 ),
@@ -299,7 +300,7 @@ async def handle_message(message: types.Message):
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg_id,
-            text=f"❌ Произошла ошибка: {str(e)}"
+            text=f"❌ Произошла ошибка: {escape_markdown_v2(str(e))}"
         )
         if 'filepath' in locals() and filepath:
             cleanup_files(filepath)
@@ -311,7 +312,7 @@ async def handle_split_callback(query: types.CallbackQuery):
     message_id = query.message.message_id
     data = dp.storage_data.get(chat_id, {})
     filepath = data.get("filepath")
-    title = data.get("title", "video")
+    title = escape_markdown_v2(data.get("title", "video"))
     
     await query.answer()
     
@@ -355,7 +356,8 @@ async def handle_split_callback(query: types.CallbackQuery):
                             chat_id=chat_id,
                             document=part_file,
                             filename=os.path.basename(part_path),
-                            caption=f"🎬 {escape_markdown_v2(title)} - Часть {i}/{len(parts)}"
+                            caption=f"🎬 {title} - Часть {i}/{len(parts)}",
+                            parse_mode=ParseMode.MARKDOWN_V2
                         )
                 except Exception as e:
                     logger.error(f"Ошибка отправки части {i}: {e}")
@@ -374,7 +376,7 @@ async def handle_split_callback(query: types.CallbackQuery):
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=f"❌ Ошибка: {str(e)}"
+                text=f"❌ Ошибка: {escape_markdown_v2(str(e))}"
             )
             cleanup_files(filepath)
     
