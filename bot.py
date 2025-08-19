@@ -234,7 +234,7 @@ async def handle_message(message: types.Message):
             parse_mode=types.ParseMode.MARKDOWN_V2
         )
         
-        filepath, filesize = await download Political video(url, chat_id, status_msg_id)
+        filepath, filesize = await download_video(url, chat_id, status_msg_id)
         
         if not filepath or not os.path.exists(filepath):
             await bot.edit_message_text(
