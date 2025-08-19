@@ -1,7 +1,9 @@
 import os
 import re
 import math
+import asyncio
 import logging
+from pathlib import Path
 from typing import Optional, List
 
 import yt_dlp
@@ -9,7 +11,7 @@ from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # Настройки
-TELEGRAM_TOKEN = "8470643853:AAFtVcEF89zYcZTPhebk1XfTjlgVFPuUJoQ"
+TELEGRAM_TOKEN = "YOUR_BOT_TOKEN_HERE"
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 CHUNK_SIZE = 1.9 * 1024 * 1024 * 1024  # 1.9 GB для безопасности
 DOWNLOAD_DIR = "downloads"
@@ -36,8 +38,6 @@ def is_youtube_url(url: str) -> bool:
 
 def format_duration(seconds: int) -> str:
     """Форматирование длительности в читаемый вид"""
-    if not seconds:
-        return "Неизвестно"
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
     if hours > 0:
@@ -54,18 +54,42 @@ def format_filesize(size_bytes: int) -> str:
     s = round(size_bytes / p, 2)
     return f"{s} {size_names[i]}"
 
-def progress_hook(d):
-    """Простой progress hook для yt-dlp"""
-    if d['status'] == 'downloading':
-        try:
-            if 'total_bytes' in d and d['total_bytes']:
-                percent = int(d['downloaded_bytes'] / d['total_bytes'] * 100)
-                if percent % 25 == 0:  # Показываем каждые 25%
-                    print(f"📥 Загружено: {percent}%")
-        except:
-            pass
+class ProgressHook:
+    """Класс для отслеживания прогресса загрузки"""
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.update = update
+        self.context = context
+        self.last_percent = 0
+        self.message = None
+    
+    async def __call__(self, d):
+        if d['status'] == 'downloading':
+            try:
+                if 'total_bytes' in d and d['total_bytes']:
+                    percent = int(d['downloaded_bytes'] / d['total_bytes'] * 100)
+                elif 'total_bytes_estimate' in d and d['total_bytes_estimate']:
+                    percent = int(d['downloaded_bytes'] / d['total_bytes_estimate'] * 100)
+                else:
+                    return
+                
+                # Обновляем только каждые 10%
+                if percent - self.last_percent >= 10:
+                    self.last_percent = percent
+                    progress_bar = "█" * (percent // 5) + "░" * (20 - percent // 5)
+                    text = f"📥 Загрузка: {percent}%\n[{progress_bar}]"
+                    
+                    try:
+                        if self.message:
+                            await self.message.edit_text(text)
+                        else:
+                            self.message = await self.update.message.reply_text(text)
+                    except Exception:
+                        pass  # Игнорируем ошибки редактирования сообщений
+                        
+            except Exception as e:
+                logger.error(f"Ошибка в progress hook: {e}")
 
-def get_video_info(url: str) -> Optional[dict]:
+async def get_video_info(url: str) -> Optional[dict]:
     """Получение информации о видео"""
     ydl_opts = {
         'quiet': True,
@@ -80,7 +104,7 @@ def get_video_info(url: str) -> Optional[dict]:
         logger.error(f"Ошибка получения информации о видео: {e}")
         return None
 
-def download_video(url: str, chat_id: int) -> tuple[Optional[str], int]:
+async def download_video(url: str, chat_id: int, update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[Optional[str], int]:
     """Загрузка видео с YouTube"""
     
     # Создаем уникальное имя файла
@@ -94,11 +118,21 @@ def download_video(url: str, chat_id: int) -> tuple[Optional[str], int]:
         'writesubtitles': False,
         'writeautomaticsub': False,
         'ignoreerrors': False,
-        'progress_hooks': [progress_hook],
     }
+    
+    # Создаем progress hook
+    progress_hook = ProgressHook(update, context)
+    ydl_opts['progress_hooks'] = [progress_hook]
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Получаем информацию о видео
+            info = ydl.extract_info(url, download=False)
+            title = info.get('title', 'Unknown')
+            duration = info.get('duration', 0)
+            
+            logger.info(f"Загружается: {title} ({format_duration(duration)})")
+            
             # Загружаем видео
             ydl.download([url])
             
@@ -159,34 +193,34 @@ def cleanup_files(*filepaths: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
     welcome_text = (
-        "🎬 *YouTube Downloader Bot*\n\n"
-        "📋 *Возможности:*\n"
+        "🎬 **YouTube Downloader Bot**\n\n"
+        "📋 **Возможности:**\n"
         "• Скачивание видео в HD/2K качестве\n"
-        "• Поддержка длинных видео (2\\+ часа)\n"
+        "• Поддержка длинных видео (2+ часа)\n"
         "• Автоматическое разделение больших файлов\n"
         "• Быстрая и стабильная загрузка\n\n"
-        "📝 *Как использовать:*\n"
-        "Просто отправьте ссылку на YouTube видео\\!"
+        "📝 **Как использовать:**\n"
+        "Просто отправьте ссылку на YouTube видео!"
     )
-    await update.message.reply_text(welcome_text, parse_mode='MarkdownV2')
+    await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /help"""
     help_text = (
-        "🆘 *Помощь*\n\n"
-        "*Команды:*\n"
-        "/start \\- Запуск бота\n"
-        "/help \\- Эта справка\n\n"
-        "*Поддерживаемые форматы ссылок:*\n"
-        "• youtube\\.com/watch?v=\\.\\.\\.\n"
-        "• youtu\\.be/\\.\\.\\.\n"
-        "• m\\.youtube\\.com/\\.\\.\\.\n\n"
-        "*Параметры загрузки:*\n"
-        "• Качество: HD \\(720p\\) \\- 2K \\(1440p\\)\n"
-        "• Максимальный размер части: 1\\.9 ГБ\n"
+        "🆘 **Помощь**\n\n"
+        "**Команды:**\n"
+        "/start - Запуск бота\n"
+        "/help - Эта справка\n\n"
+        "**Поддерживаемые форматы ссылок:**\n"
+        "• youtube.com/watch?v=...\n"
+        "• youtu.be/...\n"
+        "• m.youtube.com/...\n\n"
+        "**Параметры загрузки:**\n"
+        "• Качество: HD (720p) - 2K (1440p)\n"
+        "• Максимальный размер части: 1.9 ГБ\n"
         "• Поддержка видео любой длительности"
     )
-    await update.message.reply_text(help_text, parse_mode='MarkdownV2')
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка сообщений с YouTube ссылками"""
@@ -206,27 +240,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Получаем информацию о видео
-        video_info = get_video_info(url)
+        video_info = await get_video_info(url)
         if not video_info:
             await status_msg.edit_text("❌ Не удалось получить информацию о видео.")
             return
         
-        title = video_info.get('title', 'Unknown')
-        if len(title) > 50:
-            title = title[:50] + '...'
+        title = video_info.get('title', 'Unknown')[:50] + '...' if len(video_info.get('title', '')) > 50 else video_info.get('title', 'Unknown')
         duration = video_info.get('duration', 0)
         uploader = video_info.get('uploader', 'Unknown')
         
         info_text = (
-            f"📹 *{title.replace('*', '\\*').replace('_', '\\_').replace('`', '\\`')}*\n"
-            f"👤 {uploader.replace('*', '\\*').replace('_', '\\_').replace('`', '\\`')}\n"
+            f"📹 **{title}**\n"
+            f"👤 {uploader}\n"
             f"⏱️ {format_duration(duration)}\n\n"
-            f"🎬 Начинаю загрузку\\.\\.\\."
+            f"🎬 Начинаю загрузку..."
         )
-        await status_msg.edit_text(info_text, parse_mode='MarkdownV2')
+        await status_msg.edit_text(info_text, parse_mode='Markdown')
         
         # Загружаем видео
-        filepath, filesize = download_video(url, chat_id)
+        filepath, filesize = await download_video(url, chat_id, update, context)
         
         if not filepath or not os.path.exists(filepath):
             await status_msg.edit_text("❌ Ошибка загрузки видео. Попробуйте позже.")
@@ -244,7 +276,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=chat_id,
                     document=video_file,
                     filename=os.path.basename(filepath),
-                    caption=f"🎬 {video_info.get('title', 'video')}"
+                    caption=f"🎬 {title}"
                 )
             
             cleanup_files(filepath)
@@ -260,7 +292,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             
             await status_msg.edit_text(
-                f"⚠️ *Файл слишком большой*\n\n"
+                f"⚠️ **Файл слишком большой**\n\n"
                 f"📁 Размер: {format_filesize(filesize)}\n"
                 f"📏 Будет разделен на ~{math.ceil(filesize / CHUNK_SIZE)} частей\n\n"
                 f"Разделить файл на части?",
@@ -270,13 +302,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Сохраняем путь к файлу в контексте
             context.user_data["filepath"] = filepath
-            context.user_data["title"] = video_info.get('title', 'video')
+            context.user_data["title"] = title
     
     except Exception as e:
         logger.error(f"Общая ошибка обработки: {e}")
         await status_msg.edit_text(f"❌ Произошла ошибка: {str(e)}")
         # Очищаем файлы при ошибке
-        if 'filepath' in locals() and filepath:
+        if 'filepath' in locals():
             cleanup_files(filepath)
 
 async def handle_split_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -323,7 +355,7 @@ async def handle_split_callback(update: Update, context: ContextTypes.DEFAULT_TY
             cleanup_files(filepath, *parts)
             
             await query.edit_message_text(
-                f"✅ *Загрузка завершена!*\n"
+                f"✅ **Загрузка завершена!**\n"
                 f"📁 Отправлено частей: {len(parts)}",
                 parse_mode='Markdown'
             )
@@ -334,8 +366,7 @@ async def handle_split_callback(update: Update, context: ContextTypes.DEFAULT_TY
             cleanup_files(filepath)
     
     else:  # split_no
-        if filepath:
-            cleanup_files(filepath)
+        cleanup_files(filepath)
         await query.edit_message_text("❌ Загрузка отменена.")
     
     # Очищаем данные пользователя
@@ -344,28 +375,21 @@ async def handle_split_callback(update: Update, context: ContextTypes.DEFAULT_TY
 def main():
     """Главная функция"""
     if TELEGRAM_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ ОШИБКА: Установите токен бота в переменной TELEGRAM_TOKEN")
-        print("Получить токен можно у @BotFather в Telegram")
+        logger.error("Установите токен бота в переменной TELEGRAM_TOKEN")
         return
     
-    try:
-        # Создаем приложение
-        app = Application.builder().token(TELEGRAM_TOKEN).build()
-        
-        # Добавляем обработчики
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("help", help_cmd))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        app.add_handler(CallbackQueryHandler(handle_split_callback))
-        
-        # Запускаем бота
-        print("🚀 Бот запущен...")
-        print("Для остановки нажмите Ctrl+C")
-        app.run_polling(drop_pending_updates=True)
-        
-    except Exception as e:
-        logger.error(f"Ошибка запуска бота: {e}")
-        print(f"❌ Ошибка запуска: {e}")
+    # Создаем приложение
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Добавляем обработчики
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(handle_split_callback))
+    
+    # Запускаем бота
+    logger.info("Бот запущен...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
