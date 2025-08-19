@@ -1,395 +1,110 @@
 import os
-import re
-import math
-import asyncio
-import logging
-from pathlib import Path
-from typing import Optional, List
+import zipfile
+from pytube import YouTube
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from tqdm import tqdm
 
-import yt_dlp
-from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-
-# Настройки
-TELEGRAM_TOKEN = "8470643853:AAFtVcEF89zYcZTPhebk1XfTjlgVFPuUJoQ"
+TELEGRAM_TOKEN = "YOUR_BOT_TOKEN_HERE"
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
-CHUNK_SIZE = 1.9 * 1024 * 1024 * 1024  # 1.9 GB для безопасности
-DOWNLOAD_DIR = "downloads"
 
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+def download_video(link, chat_id):
+    yt = YouTube(link)
+    stream = yt.streams.filter(progressive=True, file_extension="mp4", res="1440p").first()
+    if not stream:
+        stream = yt.streams.filter(progressive=True, file_extension="mp4", res="1080p").first()
+    if not stream:
+        stream = yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc().first()
 
-# Создаем директорию для загрузок
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    filesize = stream.filesize
+    filename = f"video_{chat_id}.mp4"
 
-def is_youtube_url(url: str) -> bool:
-    """Проверка валидности YouTube URL"""
-    patterns = [
-        r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/',
-        r'(https?://)?youtu\.be/',
-        r'(https?://)?m\.youtube\.com/',
-        r'(https?://)?gaming\.youtube\.com/'
-    ]
-    return any(re.match(pattern, url) for pattern in patterns)
+    with tqdm(total=filesize, unit='B', unit_scale=True, desc="Downloading") as pbar:
+        def progress(stream, chunk, bytes_remaining):
+            pbar.update(len(chunk))
 
-def format_duration(seconds: int) -> str:
-    """Форматирование длительности в читаемый вид"""
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-    if hours > 0:
-        return f"{hours}ч {minutes}м"
-    return f"{minutes}м"
+        yt.register_on_progress_callback(progress)
+        stream.download(filename=filename)
 
-def format_filesize(size_bytes: int) -> str:
-    """Форматирование размера файла"""
-    if size_bytes == 0:
-        return "0 B"
-    size_names = ["B", "KB", "MB", "GB"]
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s} {size_names[i]}"
+    return filename, filesize
 
-class ProgressHook:
-    """Класс для отслеживания прогресса загрузки"""
-    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        self.update = update
-        self.context = context
-        self.last_percent = 0
-        self.message = None
-    
-    async def __call__(self, d):
-        if d['status'] == 'downloading':
-            try:
-                if 'total_bytes' in d and d['total_bytes']:
-                    percent = int(d['downloaded_bytes'] / d['total_bytes'] * 100)
-                elif 'total_bytes_estimate' in d and d['total_bytes_estimate']:
-                    percent = int(d['downloaded_bytes'] / d['total_bytes_estimate'] * 100)
-                else:
-                    return
-                
-                # Обновляем только каждые 10%
-                if percent - self.last_percent >= 10:
-                    self.last_percent = percent
-                    progress_bar = "█" * (percent // 5) + "░" * (20 - percent // 5)
-                    text = f"📥 Загрузка: {percent}%\n[{progress_bar}]"
-                    
-                    try:
-                        if self.message:
-                            await self.message.edit_text(text)
-                        else:
-                            self.message = await self.update.message.reply_text(text)
-                    except Exception:
-                        pass  # Игнорируем ошибки редактирования сообщений
-                        
-            except Exception as e:
-                logger.error(f"Ошибка в progress hook: {e}")
+def make_zip(filename, chat_id):
+    zip_filename = f"video_{chat_id}.zip"
+    with zipfile.ZipFile(zip_filename, "w") as zipf:
+        zipf.write(filename, os.path.basename(filename))
+    return zip_filename
 
-async def get_video_info(url: str) -> Optional[dict]:
-    """Получение информации о видео"""
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-    }
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return info
-    except Exception as e:
-        logger.error(f"Ошибка получения информации о видео: {e}")
-        return None
-
-async def download_video(url: str, chat_id: int, update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[Optional[str], int]:
-    """Загрузка видео с YouTube"""
-    
-    # Создаем уникальное имя файла
-    output_template = os.path.join(DOWNLOAD_DIR, f'video_{chat_id}_%(title)s.%(ext)s')
-    
-    # Настройки для yt-dlp с приоритетом HD/2K качества
-    ydl_opts = {
-        'outtmpl': output_template,
-        'format': 'bestvideo[height>=720][height<=1440]+bestaudio/best[height>=720][height<=1440]/best',
-        'merge_output_format': 'mp4',
-        'writesubtitles': False,
-        'writeautomaticsub': False,
-        'ignoreerrors': False,
-    }
-    
-    # Создаем progress hook
-    progress_hook = ProgressHook(update, context)
-    ydl_opts['progress_hooks'] = [progress_hook]
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Получаем информацию о видео
-            info = ydl.extract_info(url, download=False)
-            title = info.get('title', 'Unknown')
-            duration = info.get('duration', 0)
-            
-            logger.info(f"Загружается: {title} ({format_duration(duration)})")
-            
-            # Загружаем видео
-            ydl.download([url])
-            
-            # Находим загруженный файл
-            for file in os.listdir(DOWNLOAD_DIR):
-                if file.startswith(f'video_{chat_id}_') and file.endswith('.mp4'):
-                    filepath = os.path.join(DOWNLOAD_DIR, file)
-                    filesize = os.path.getsize(filepath)
-                    return filepath, filesize
-            
-            return None, 0
-            
-    except Exception as e:
-        logger.error(f"Ошибка загрузки видео: {e}")
-        return None, 0
-
-def split_file(filepath: str, chat_id: int) -> List[str]:
-    """Разделение файла на части"""
+def split_file(filename, chat_id):
     parts = []
     part_num = 1
-    base_name = os.path.splitext(os.path.basename(filepath))[0]
-    
-    try:
-        with open(filepath, "rb") as f:
-            while True:
-                chunk = f.read(int(CHUNK_SIZE))
-                if not chunk:
-                    break
-                
-                part_filename = os.path.join(DOWNLOAD_DIR, f"{base_name}_part{part_num:02d}.mp4")
-                with open(part_filename, "wb") as part_file:
-                    part_file.write(chunk)
-                
-                parts.append(part_filename)
-                part_num += 1
-                
-        logger.info(f"Файл разделен на {len(parts)} частей")
-        return parts
-        
-    except Exception as e:
-        logger.error(f"Ошибка разделения файла: {e}")
-        # Очищаем созданные части при ошибке
-        for part in parts:
-            if os.path.exists(part):
-                os.remove(part)
-        return []
+    with open(filename, "rb") as f:
+        while True:
+            chunk = f.read(MAX_FILE_SIZE - 10 * 1024 * 1024)
+            if not chunk:
+                break
+            part_filename = f"video_{chat_id}_part{part_num}.mp4"
+            with open(part_filename, "wb") as part_file:
+                part_file.write(chunk)
+            parts.append(part_filename)
+            part_num += 1
+    return parts
 
-def cleanup_files(*filepaths: str):
-    """Безопасная очистка файлов"""
-    for filepath in filepaths:
-        try:
-            if filepath and os.path.exists(filepath):
-                os.remove(filepath)
-                logger.info(f"Удален файл: {filepath}")
-        except Exception as e:
-            logger.error(f"Ошибка удаления файла {filepath}: {e}")
+async def start(update, context):
+    await update.message.reply_text("Привет! 🎬 Отправь ссылку на YouTube.")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start"""
-    welcome_text = (
-        "🎬 **YouTube Downloader Bot**\n\n"
-        "📋 **Возможности:**\n"
-        "• Скачивание видео в HD/2K качестве\n"
-        "• Поддержка длинных видео (2+ часа)\n"
-        "• Автоматическое разделение больших файлов\n"
-        "• Быстрая и стабильная загрузка\n\n"
-        "📝 **Как использовать:**\n"
-        "Просто отправьте ссылку на YouTube видео!"
-    )
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+async def help_cmd(update, context):
+    await update.message.reply_text("📌 Команды: /start /help")
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /help"""
-    help_text = (
-        "🆘 **Помощь**\n\n"
-        "**Команды:**\n"
-        "/start - Запуск бота\n"
-        "/help - Эта справка\n\n"
-        "**Поддерживаемые форматы ссылок:**\n"
-        "• youtube.com/watch?v=...\n"
-        "• youtu.be/...\n"
-        "• m.youtube.com/...\n\n"
-        "**Параметры загрузки:**\n"
-        "• Качество: HD (720p) - 2K (1440p)\n"
-        "• Максимальный размер части: 1.9 ГБ\n"
-        "• Поддержка видео любой длительности"
-    )
-    await update.message.reply_text(help_text, parse_mode='Markdown')
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка сообщений с YouTube ссылками"""
+async def handle_message(update, context):
     chat_id = update.message.chat_id
-    url = update.message.text.strip()
-    
-    # Проверяем валидность URL
-    if not is_youtube_url(url):
-        await update.message.reply_text(
-            "❌ Пожалуйста, отправьте корректную ссылку на YouTube видео.\n"
-            "Пример: https://youtube.com/watch?v=..."
-        )
-        return
-    
-    # Отправляем сообщение о начале обработки
-    status_msg = await update.message.reply_text("🔍 Анализирую видео...")
-    
-    try:
-        # Получаем информацию о видео
-        video_info = await get_video_info(url)
-        if not video_info:
-            await status_msg.edit_text("❌ Не удалось получить информацию о видео.")
-            return
-        
-        title = video_info.get('title', 'Unknown')[:50] + '...' if len(video_info.get('title', '')) > 50 else video_info.get('title', 'Unknown')
-        duration = video_info.get('duration', 0)
-        uploader = video_info.get('uploader', 'Unknown')
-        
-        info_text = (
-            f"📹 **{title}**\n"
-            f"👤 {uploader}\n"
-            f"⏱️ {format_duration(duration)}\n\n"
-            f"🎬 Начинаю загрузку..."
-        )
-        await status_msg.edit_text(info_text, parse_mode='Markdown')
-        
-        # Загружаем видео
-        filepath, filesize = await download_video(url, chat_id, update, context)
-        
-        if not filepath or not os.path.exists(filepath):
-            await status_msg.edit_text("❌ Ошибка загрузки видео. Попробуйте позже.")
-            return
-        
-        logger.info(f"Загружен файл: {filepath}, размер: {format_filesize(filesize)}")
-        
-        # Проверяем размер файла
-        if filesize <= MAX_FILE_SIZE:
-            # Отправляем как один файл
-            await status_msg.edit_text(f"📤 Отправляю файл ({format_filesize(filesize)})...")
-            
-            with open(filepath, 'rb') as video_file:
-                await context.bot.send_document(
-                    chat_id=chat_id,
-                    document=video_file,
-                    filename=os.path.basename(filepath),
-                    caption=f"🎬 {title}"
-                )
-            
-            cleanup_files(filepath)
-            await status_msg.delete()
-            
-        else:
-            # Файл слишком большой - предлагаем разделить
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ Да, разделить", callback_data="split_yes"),
-                    InlineKeyboardButton("❌ Нет, отменить", callback_data="split_no")
-                ]
-            ]
-            
-            await status_msg.edit_text(
-                f"⚠️ **Файл слишком большой**\n\n"
-                f"📁 Размер: {format_filesize(filesize)}\n"
-                f"📏 Будет разделен на ~{math.ceil(filesize / CHUNK_SIZE)} частей\n\n"
-                f"Разделить файл на части?",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='Markdown'
-            )
-            
-            # Сохраняем путь к файлу в контексте
-            context.user_data["filepath"] = filepath
-            context.user_data["title"] = title
-    
-    except Exception as e:
-        logger.error(f"Общая ошибка обработки: {e}")
-        await status_msg.edit_text(f"❌ Произошла ошибка: {str(e)}")
-        # Очищаем файлы при ошибке
-        if 'filepath' in locals():
-            cleanup_files(filepath)
+    link = update.message.text.strip()
+    await update.message.reply_text("⏳ Скачиваю видео...")
 
-async def handle_split_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка callback для разделения файла"""
+    try:
+        filename, filesize = download_video(link, chat_id)
+
+        if filesize <= MAX_FILE_SIZE:
+            zip_filename = make_zip(filename, chat_id)
+            await context.bot.send_document(chat_id=chat_id, document=open(zip_filename, "rb"))
+            os.remove(filename)
+            os.remove(zip_filename)
+        else:
+            keyboard = [[
+                InlineKeyboardButton("✅ Да", callback_data="split_yes"),
+                InlineKeyboardButton("❌ Нет", callback_data="split_no")
+            ]]
+            await update.message.reply_text("⚠️ Видео слишком большое, разделить?", reply_markup=InlineKeyboardMarkup(keyboard))
+            context.user_data["filename"] = filename
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+async def ask_split(update, context):
     query = update.callback_query
     await query.answer()
-    
     chat_id = query.message.chat_id
-    filepath = context.user_data.get("filepath")
-    title = context.user_data.get("title", "video")
-    
+    filename = context.user_data.get("filename")
+
     if query.data == "split_yes":
-        if not filepath or not os.path.exists(filepath):
-            await query.edit_message_text("❌ Файл не найден.")
-            return
-        
-        await query.edit_message_text("✂️ Разделяю файл на части...")
-        
-        try:
-            # Разделяем файл
-            parts = split_file(filepath, chat_id)
-            
-            if not parts:
-                await query.edit_message_text("❌ Ошибка разделения файла.")
-                cleanup_files(filepath)
-                return
-            
-            # Отправляем части
-            await query.edit_message_text(f"📤 Отправляю {len(parts)} частей...")
-            
-            for i, part_path in enumerate(parts, 1):
-                try:
-                    with open(part_path, 'rb') as part_file:
-                        await context.bot.send_document(
-                            chat_id=chat_id,
-                            document=part_file,
-                            filename=os.path.basename(part_path),
-                            caption=f"🎬 {title} - Часть {i}/{len(parts)}"
-                        )
-                except Exception as e:
-                    logger.error(f"Ошибка отправки части {i}: {e}")
-            
-            # Очищаем файлы
-            cleanup_files(filepath, *parts)
-            
-            await query.edit_message_text(
-                f"✅ **Загрузка завершена!**\n"
-                f"📁 Отправлено частей: {len(parts)}",
-                parse_mode='Markdown'
-            )
-            
-        except Exception as e:
-            logger.error(f"Ошибка разделения/отправки: {e}")
-            await query.edit_message_text(f"❌ Ошибка: {str(e)}")
-            cleanup_files(filepath)
-    
-    else:  # split_no
-        cleanup_files(filepath)
-        await query.edit_message_text("❌ Загрузка отменена.")
-    
-    # Очищаем данные пользователя
-    context.user_data.clear()
+        parts = split_file(filename, chat_id)
+        for part in parts:
+            await context.bot.send_document(chat_id=chat_id, document=open(part, "rb"))
+            os.remove(part)
+        os.remove(filename)
+        await query.edit_message_text("✅ Отправлено частями.")
+    else:
+        os.remove(filename)
+        await query.edit_message_text("❌ Отменено.")
 
 def main():
-    """Главная функция"""
-    if TELEGRAM_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        logger.error("Установите токен бота в переменной TELEGRAM_TOKEN")
-        return
-    
-    # Создаем приложение
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Добавляем обработчики
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CallbackQueryHandler(handle_split_callback))
-    
-    # Запускаем бота
-    logger.info("Бот запущен...")
-    app.run_polling(drop_pending_updates=True)
+    app.add_handler(CallbackQueryHandler(ask_split))
+
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
