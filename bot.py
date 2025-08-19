@@ -5,11 +5,15 @@ import logging
 from typing import Optional, List
 
 import yt_dlp
-from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command, RegexpCommandsFilter
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 
 # Настройки
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 CHUNK_SIZE = 1.9 * 1024 * 1024 * 1024  # 1.9 GB для безопасности
 DOWNLOAD_DIR = "downloads"
@@ -23,6 +27,10 @@ logger = logging.getLogger(__name__)
 
 # Создаем директорию для загрузок
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# Инициализация бота и диспетчера
+bot = Bot(token=TELEGRAM_TOKEN)
+dp = Dispatcher()
 
 def is_youtube_url(url: str) -> bool:
     """Проверка валидности YouTube URL"""
@@ -54,20 +62,20 @@ def format_filesize(size_bytes: int) -> str:
     s = round(size_bytes / p, 2)
     return f"{s} {size_names[i]}"
 
-def progress_hook(d, status_msg_id, chat_id, bot):
+async def progress_hook(d, status_msg_id, chat_id):
     """Progress hook для yt-dlp с обновлением сообщения в Telegram"""
     if d['status'] == 'downloading':
         try:
             if 'total_bytes' in d and d['total_bytes']:
                 percent = int(d['downloaded_bytes'] / d['total_bytes'] * 100)
                 if percent % 10 == 0:  # Обновляем каждые 10% для снижения нагрузки
-                    bot.edit_message_text(
+                    await bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=status_msg_id,
                         text=f"📥 Загружено: {percent}%"
                     )
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Ошибка обновления прогресса: {e}")
 
 def get_video_info(url: str) -> Optional[dict]:
     """Получение информации о видео"""
@@ -84,13 +92,10 @@ def get_video_info(url: str) -> Optional[dict]:
         logger.error(f"Ошибка получения информации о видео: {e}")
         return None
 
-def download_video(url: str, chat_id: int, status_msg_id: int, bot) -> tuple[Optional[str], int]:
+async def download_video(url: str, chat_id: int, status_msg_id: int) -> tuple[Optional[str], int]:
     """Загрузка видео с YouTube"""
-    
-    # Создаем уникальное имя файла
     output_template = os.path.join(DOWNLOAD_DIR, f'video_{chat_id}_%(title)s.%(ext)s')
     
-    # Настройки для yt-dlp с приоритетом HD/2K качества
     ydl_opts = {
         'outtmpl': output_template,
         'format': 'bestvideo[height>=720][height<=1440]+bestaudio/best[height>=720][height<=1440]/best',
@@ -98,15 +103,13 @@ def download_video(url: str, chat_id: int, status_msg_id: int, bot) -> tuple[Opt
         'writesubtitles': False,
         'writeautomaticsub': False,
         'ignoreerrors': False,
-        'progress_hooks': [lambda d: progress_hook(d, status_msg_id, chat_id, bot)],
+        'progress_hooks': [lambda d: dp.loop.create_task(progress_hook(d, status_msg_id, chat_id))],
     }
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Загружаем видео
             ydl.download([url])
             
-            # Находим загруженный файл
             for file in os.listdir(DOWNLOAD_DIR):
                 if file.startswith(f'video_{chat_id}_') and file.endswith('.mp4'):
                     filepath = os.path.join(DOWNLOAD_DIR, file)
@@ -144,7 +147,6 @@ def split_file(filepath: str, chat_id: int) -> List[str]:
         
     except Exception as e:
         logger.error(f"Ошибка разделения файла: {e}")
-        # Очищаем созданные части при ошибке
         for part in parts:
             if os.path.exists(part):
                 os.remove(part)
@@ -160,7 +162,8 @@ def cleanup_files(*filepaths: str):
         except Exception as e:
             logger.error(f"Ошибка удаления файла {filepath}: {e}")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@dp.message(Command("start"))
+async def start(message: types.Message):
     """Команда /start"""
     welcome_text = (
         "🎬 *YouTube Downloader Bot*\n\n"
@@ -172,9 +175,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 *Как использовать:*\n"
         "Просто отправьте ссылку на YouTube видео!"
     )
-    await update.message.reply_text(welcome_text, parse_mode='MarkdownV2')
+    await message.reply(welcome_text, parse_mode=types.ParseMode.MARKDOWN_V2)
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@dp.message(Command("help"))
+async def help_cmd(message: types.Message):
     """Команда /help"""
     help_text = (
         "🆘 *Помощь*\n\n"
@@ -190,30 +194,28 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Максимальный размер части: 1.9 ГБ\n"
         "• Поддержка видео любой длительности"
     )
-    await update.message.reply_text(help_text, parse_mode='MarkdownV2')
+    await message.reply(help_text, parse_mode=types.ParseMode.MARKDOWN_V2)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@dp.message(RegexpCommandsFilter(regexp_commands=[r'https?://.*']))
+async def handle_message(message: types.Message):
     """Обработка сообщений с YouTube ссылками"""
-    chat_id = update.message.chat_id
-    url = update.message.text.strip()
+    chat_id = message.chat.id
+    url = message.text.strip()
     
-    # Проверяем валидность URL
     if not is_youtube_url(url):
-        await update.message.reply_text(
+        await message.reply(
             "❌ Пожалуйста, отправьте корректную ссылку на YouTube видео.\n"
             "Пример: https://youtube.com/watch?v=..."
         )
         return
     
-    # Отправляем сообщение о начале обработки
-    status_msg = await update.message.reply_text("🔍 Анализирую видео...")
+    status_msg = await message.reply("🔍 Анализирую видео...")
     status_msg_id = status_msg.message_id
     
     try:
-        # Получаем информацию о видео
         video_info = get_video_info(url)
         if not video_info:
-            await context.bot.edit_message_text(
+            await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
                 text="❌ Не удалось получить информацию о видео."
@@ -232,18 +234,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏱️ {format_duration(duration)}\n\n"
             f"🎬 Начинаю загрузку..."
         )
-        await context.bot.edit_message_text(
+        await bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg_id,
             text=info_text,
-            parse_mode='MarkdownV2'
+            parse_mode=types.ParseMode.MARKDOWN_V2
         )
         
-        # Загружаем видео с передачей bot для обновлений
-        filepath, filesize = download_video(url, chat_id, status_msg_id, context.bot)
+        filepath, filesize = await download_video(url, chat_id, status_msg_id)
         
         if not filepath or not os.path.exists(filepath):
-            await context.bot.edit_message_text(
+            await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
                 text="❌ Ошибка загрузки видео. Попробуйте позже."
@@ -252,17 +253,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         logger.info(f"Загружен файл: {filepath}, размер: {format_filesize(filesize)}")
         
-        # Проверяем размер файла
         if filesize <= MAX_FILE_SIZE:
-            # Отправляем как один файл
-            await context.bot.edit_message_text(
+            await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
                 text=f"📤 Отправляю файл ({format_filesize(filesize)})..."
             )
             
             with open(filepath, 'rb') as video_file:
-                await context.bot.send_document(
+                await bot.send_document(
                     chat_id=chat_id,
                     document=video_file,
                     filename=os.path.basename(filepath),
@@ -270,18 +269,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             
             cleanup_files(filepath)
-            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg_id)
+            await bot.delete_message(chat_id=chat_id, message_id=status_msg_id)
             
         else:
-            # Файл слишком большой - предлагаем разделить
-            keyboard = [
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton("✅ Да, разделить", callback_data="split_yes"),
                     InlineKeyboardButton("❌ Нет, отменить", callback_data="split_no")
                 ]
-            ]
+            ])
             
-            await context.bot.edit_message_text(
+            await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
                 text=(
@@ -290,57 +288,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"📏 Будет разделен на ~{math.ceil(filesize / CHUNK_SIZE)} частей\n\n"
                     f"Разделить файл на части?"
                 ),
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='Markdown'
+                reply_markup=keyboard,
+                parse_mode=types.ParseMode.MARKDOWN
             )
             
-            # Сохраняем путь к файлу в контексте
-            context.user_data["filepath"] = filepath
-            context.user_data["title"] = video_info.get('title', 'video')
+            dp.storage_data[chat_id] = {"filepath": filepath, "title": video_info.get('title', 'video')}
     
     except Exception as e:
         logger.error(f"Общая ошибка обработки: {e}")
-        await context.bot.edit_message_text(
+        await bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg_id,
             text=f"❌ Произошла ошибка: {str(e)}"
         )
-        # Очищаем файлы при ошибке
         if 'filepath' in locals() and filepath:
             cleanup_files(filepath)
 
-async def handle_split_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@dp.callback_query()
+async def handle_split_callback(query: types.CallbackQuery):
     """Обработка callback для разделения файла"""
-    query = update.callback_query
-    await query.answer()
+    chat_id = query.message.chat.id
+    message_id = query.message.message_id
+    data = dp.storage_data.get(chat_id, {})
+    filepath = data.get("filepath")
+    title = data.get("title", "video")
     
-    chat_id = query.message.chat_id
-    filepath = context.user_data.get("filepath")
-    title = context.user_data.get("title", "video")
+    await query.answer()
     
     if query.data == "split_yes":
         if not filepath or not os.path.exists(filepath):
-            await query.edit_message_text("❌ Файл не найден.")
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="❌ Файл не найден."
+            )
             return
         
-        await query.edit_message_text("✂️ Разделяю файл на части...")
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="✂️ Разделяю файл на части..."
+        )
         
         try:
-            # Разделяем файл
             parts = split_file(filepath, chat_id)
             
             if not parts:
-                await query.edit_message_text("❌ Ошибка разделения файла.")
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text="❌ Ошибка разделения файла."
+                )
                 cleanup_files(filepath)
                 return
             
-            # Отправляем части
-            await query.edit_message_text(f"📤 Отправляю {len(parts)} частей...")
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"📤 Отправляю {len(parts)} частей..."
+            )
             
             for i, part_path in enumerate(parts, 1):
                 try:
                     with open(part_path, 'rb') as part_file:
-                        await context.bot.send_document(
+                        await bot.send_document(
                             chat_id=chat_id,
                             document=part_file,
                             filename=os.path.basename(part_path),
@@ -349,27 +360,46 @@ async def handle_split_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 except Exception as e:
                     logger.error(f"Ошибка отправки части {i}: {e}")
             
-            # Очищаем файлы
             cleanup_files(filepath, *parts)
             
-            await query.edit_message_text(
-                f"✅ *Загрузка завершена!*\n"
-                f"📁 Отправлено частей: {len(parts)}",
-                parse_mode='Markdown'
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"✅ *Загрузка завершена!*\n📁 Отправлено частей: {len(parts)}",
+                parse_mode=types.ParseMode.MARKDOWN
             )
             
         except Exception as e:
             logger.error(f"Ошибка разделения/отправки: {e}")
-            await query.edit_message_text(f"❌ Ошибка: {str(e)}")
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"❌ Ошибка: {str(e)}"
+            )
             cleanup_files(filepath)
     
     else:  # split_no
         if filepath:
             cleanup_files(filepath)
-        await query.edit_message_text("❌ Загрузка отменена.")
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="❌ Загрузка отменена."
+        )
     
-    # Очищаем данные пользователя
-    context.user_data.clear()
+    dp.storage_data.pop(chat_id, None)
+
+async def on_startup():
+    """Установка webhook при запуске"""
+    webhook_path = f"/{TELEGRAM_TOKEN}"
+    webhook_url = f"{WEBHOOK_URL}{webhook_path}"
+    await bot.set_webhook(url=webhook_url)
+    logger.info(f"🚀 Webhook установлен: {webhook_url}")
+
+async def on_shutdown():
+    """Очистка при завершении работы"""
+    await bot.delete_webhook()
+    logger.info("🚀 Webhook удален")
 
 def main():
     """Главная функция"""
@@ -377,35 +407,20 @@ def main():
         logger.error("❌ ОШИБКА: Токен бота не найден в переменной окружения TELEGRAM_TOKEN")
         return
     
-    try:
-        # Создаем приложение
-        app = Application.builder().token(TELEGRAM_TOKEN).build()
-        
-        # Добавляем обработчики
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("help", help_cmd))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        app.add_handler(CallbackQueryHandler(handle_split_callback))
-        
-        # Для Render.com используем webhook
-        port = int(os.environ.get('PORT', 8443))
-        webhook_url = os.environ.get('WEBHOOK_URL')  # Установите в Render.com как переменную окружения, например https://your-service-name.onrender.com
-        
-        if not webhook_url:
-            logger.error("❌ WEBHOOK_URL не установлен в переменных окружения")
-            return
-        
-        app.run_webhook(
-            listen='0.0.0.0',
-            port=port,
-            url_path=TELEGRAM_TOKEN,
-            webhook_url=f"{webhook_url}/{TELEGRAM_TOKEN}"
-        )
-        
-        logger.info("🚀 Бот запущен в режиме webhook...")
-        
-    except Exception as e:
-        logger.error(f"Ошибка запуска бота: {e}")
+    if not WEBHOOK_URL:
+        logger.error("❌ ОШИБКА: WEBHOOK_URL не установлен в переменных окружения")
+        return
+    
+    app = web.Application()
+    webhook_path = f"/{TELEGRAM_TOKEN}"
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=webhook_path)
+    setup_application(app, dp, bot=bot)
+    
+    port = int(os.environ.get('PORT', 8443))
+    logger.info(f"🚀 Запуск сервера на порту {port}...")
+    web.run_app(app, host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
     main()
