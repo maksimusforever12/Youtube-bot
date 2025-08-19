@@ -9,7 +9,7 @@ from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # Настройки
-TELEGRAM_TOKEN = "YOUR_BOT_TOKEN_HERE"
+TELEGRAM_TOKEN = "8470643853:AAFtVcEF89zYcZTPhebk1XfTjlgVFPuUJoQ"
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 CHUNK_SIZE = 1.9 * 1024 * 1024 * 1024  # 1.9 GB для безопасности
 DOWNLOAD_DIR = "downloads"
