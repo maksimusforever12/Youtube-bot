@@ -8,6 +8,7 @@ import yt_dlp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.enums import ParseMode
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
@@ -175,7 +176,7 @@ async def start(message: types.Message):
         "📝 *Как использовать:*\n"
         "Просто отправьте ссылку на YouTube видео!"
     )
-    await message.reply(welcome_text, parse_mode=types.ParseMode.MARKDOWN_V2)
+    await message.reply(welcome_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
@@ -194,7 +195,7 @@ async def help_cmd(message: types.Message):
         "• Максимальный размер части: 1.9 ГБ\n"
         "• Поддержка видео любой длительности"
     )
-    await message.reply(help_text, parse_mode=types.ParseMode.MARKDOWN_V2)
+    await message.reply(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 @dp.message(lambda message: is_youtube_url(message.text.strip()))
 async def handle_message(message: types.Message):
@@ -231,7 +232,7 @@ async def handle_message(message: types.Message):
             chat_id=chat_id,
             message_id=status_msg_id,
             text=info_text,
-            parse_mode=types.ParseMode.MARKDOWN_V2
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         
         filepath, filesize = await download_video(url, chat_id, status_msg_id)
@@ -282,7 +283,7 @@ async def handle_message(message: types.Message):
                     f"Разделить файл на части?"
                 ),
                 reply_markup=keyboard,
-                parse_mode=types.ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN
             )
             
             dp.storage_data[chat_id] = {"filepath": filepath, "title": video_info.get('title', 'video')}
@@ -359,7 +360,7 @@ async def handle_split_callback(query: types.CallbackQuery):
                 chat_id=chat_id,
                 message_id=message_id,
                 text=f"✅ *Загрузка завершена!*\n📁 Отправлено частей: {len(parts)}",
-                parse_mode=types.ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN
             )
             
         except Exception as e:
