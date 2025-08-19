@@ -33,6 +33,11 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
+def escape_markdown_v2(text: str) -> str:
+    """Экранирование зарезервированных символов для MarkdownV2"""
+    reserved_chars = r'_*[]()~`>#+-=|{}.!'
+    return ''.join(f'\\{char}' if char in reserved_chars else char for char in text)
+
 def is_youtube_url(url: str) -> bool:
     """Проверка валидности YouTube URL"""
     patterns = [
@@ -219,12 +224,13 @@ async def handle_message(message: types.Message):
         title = video_info.get('title', 'Unknown')
         if len(title) > 50:
             title = title[:50] + '...'
+        title = escape_markdown_v2(title)
+        uploader = escape_markdown_v2(video_info.get('uploader', 'Unknown'))
         duration = video_info.get('duration', 0)
-        uploader = video_info.get('uploader', 'Unknown')
         
         info_text = (
-            f"📹 *{title.replace('*', '\\*').replace('_', '\\_').replace('`', '\\`')}*\n"
-            f"👤 {uploader.replace('*', '\\*').replace('_', '\\_').replace('`', '\\`')}\n"
+            f"📹 *{title}*\n"
+            f"👤 {uploader}\n"
             f"⏱️ {format_duration(duration)}\n\n"
             f"🎬 Начинаю загрузку..."
         )
@@ -259,7 +265,7 @@ async def handle_message(message: types.Message):
                     chat_id=chat_id,
                     document=video_file,
                     filename=os.path.basename(filepath),
-                    caption=f"🎬 {video_info.get('title', 'video')}"
+                    caption=f"🎬 {escape_markdown_v2(video_info.get('title', 'video'))}"
                 )
             
             cleanup_files(filepath)
@@ -283,7 +289,7 @@ async def handle_message(message: types.Message):
                     f"Разделить файл на части?"
                 ),
                 reply_markup=keyboard,
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN_V2
             )
             
             dp.storage_data[chat_id] = {"filepath": filepath, "title": video_info.get('title', 'video')}
@@ -349,7 +355,7 @@ async def handle_split_callback(query: types.CallbackQuery):
                             chat_id=chat_id,
                             document=part_file,
                             filename=os.path.basename(part_path),
-                            caption=f"🎬 {title} - Часть {i}/{len(parts)}"
+                            caption=f"🎬 {escape_markdown_v2(title)} - Часть {i}/{len(parts)}"
                         )
                 except Exception as e:
                     logger.error(f"Ошибка отправки части {i}: {e}")
@@ -360,7 +366,7 @@ async def handle_split_callback(query: types.CallbackQuery):
                 chat_id=chat_id,
                 message_id=message_id,
                 text=f"✅ *Загрузка завершена!*\n📁 Отправлено частей: {len(parts)}",
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN_V2
             )
             
         except Exception as e:
