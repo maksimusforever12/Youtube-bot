@@ -6,7 +6,7 @@ from typing import Optional, List
 
 import yt_dlp
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command, RegexpCommandsFilter
+from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
@@ -196,18 +196,11 @@ async def help_cmd(message: types.Message):
     )
     await message.reply(help_text, parse_mode=types.ParseMode.MARKDOWN_V2)
 
-@dp.message(RegexpCommandsFilter(regexp_commands=[r'https?://.*']))
+@dp.message(lambda message: is_youtube_url(message.text.strip()))
 async def handle_message(message: types.Message):
     """Обработка сообщений с YouTube ссылками"""
     chat_id = message.chat.id
     url = message.text.strip()
-    
-    if not is_youtube_url(url):
-        await message.reply(
-            "❌ Пожалуйста, отправьте корректную ссылку на YouTube видео.\n"
-            "Пример: https://youtube.com/watch?v=..."
-        )
-        return
     
     status_msg = await message.reply("🔍 Анализирую видео...")
     status_msg_id = status_msg.message_id
@@ -241,7 +234,7 @@ async def handle_message(message: types.Message):
             parse_mode=types.ParseMode.MARKDOWN_V2
         )
         
-        filepath, filesize = await download_video(url, chat_id, status_msg_id)
+        filepath, filesize = await download Political video(url, chat_id, status_msg_id)
         
         if not filepath or not os.path.exists(filepath):
             await bot.edit_message_text(
