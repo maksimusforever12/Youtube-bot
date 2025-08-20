@@ -125,14 +125,14 @@ async def handle_test_callback(query: types.CallbackQuery, state: FSMContext):
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
-            text="✅ *Действие подтверждено!*\n\nТест успешно пройден\\.",
+            text=escape_markdown_v2("✅ *Действие подтверждено!*\n\nТест успешно пройден."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
     else:  # test_cancel
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
-            text="❌ *Действие отменено\\.*\n\nТест завершён\\.",
+            text=escape_markdown_v2("❌ *Действие отменено.*\n\nТест завершён."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
     await state.clear()
