@@ -7,6 +7,7 @@ import json
 import time
 import asyncio
 from typing import Optional, List
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -14,12 +15,11 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiohttp import web
 
 # Настройки
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
-CHUNK_SIZE = 1.9 * 1024 * 1024 * 1024  # 1.9 GB для безопасности
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 ГБ
+CHUNK_SIZE = 1.9 * 1024 * 1024 * 1024  # 1.9 ГБ для безопасности
 DOWNLOAD_DIR = "downloads"
 
 # Настройка логирования
