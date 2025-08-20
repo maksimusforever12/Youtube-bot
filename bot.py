@@ -38,8 +38,7 @@ bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher(storage=storage)
 
 # Состояния для FSM
-class TestStates(StatesGroup):
-    waiting_for_test_action = State()
+class VideoStates(StatesGroup):
     waiting_for_url = State()
     waiting_for_split = State()
 
@@ -242,7 +241,7 @@ def cleanup_files(*filepaths: str):
             logger.error(f"Ошибка удаления файла {filepath}: {e}")
 
 @dp.message(Command("start"))
-async def start(message: types.Message):
+async def start(message: types.Message, state: FSMContext):
     """Команда /start"""
     await rate_limiter.wait_if_needed()
     welcome_text = (
@@ -250,16 +249,14 @@ async def start(message: types.Message):
         "📋 *Возможности:*\n"
         "• Скачивание видео в HD/2K качестве\n"
         "• Поддержка длинных видео \\(2+ часа\\)\n"
-        "• Автоматическое разделение больших файлов\n"
-        "• Тестирование интерфейса\n\n"
+        "• Автоматическое разделение больших файлов\n\n"
         "📝 *Как использовать:*\n"
         "Отправьте ссылку на YouTube видео или используйте команды:\n"
         "/start \\- Начать работу\n"
-        "/help \\- Показать справку\n"
-        "/test \\- Тестировать инлайн\\-кнопки"
+        "/help \\- Показать справку"
     )
     await message.reply(welcome_text, parse_mode=ParseMode.MARKDOWN_V2)
-    await message.bot.set_state(message.chat.id, TestStates.waiting_for_url)
+    await state.set_state(VideoStates.waiting_for_url)
 
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
@@ -269,8 +266,7 @@ async def help_cmd(message: types.Message):
         "🆘 *Помощь*\n\n"
         "*Команды:*\n"
         "/start \\- Запуск бота\n"
-        "/help \\- Эта справка\n"
-        "/test \\- Тестирование инлайн\\-кнопок\n\n"
+        "/help \\- Эта справка\n\n"
         "*Как скачать видео:*\n"
         "Отправьте ссылку на YouTube видео\\. Если размер превысит 2 ГБ, бот предложит разделить файл\\.\n\n"
         "*Поддерживаемые форматы ссылок:*\n"
@@ -280,24 +276,7 @@ async def help_cmd(message: types.Message):
     )
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
-@dp.message(Command("test"))
-async def test_cmd(message: types.Message, state: FSMContext):
-    """Команда /test для проверки инлайн-кнопок"""
-    await rate_limiter.wait_if_needed()
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Подтвердить", callback_data="test_confirm"),
-            InlineKeyboardButton(text="❌ Отменить", callback_data="test_cancel")
-        ]
-    ])
-    await message.reply(
-        escape_markdown_v2("🧪 *Тест интерфейса*\n\nНажмите одну из кнопок для проверки:"),
-        reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
-    await state.set_state(TestStates.waiting_for_test_action)
-
-@dp.message(TestStates.waiting_for_url)
+@dp.message(VideoStates.waiting_for_url)
 async def handle_message(message: types.Message, state: FSMContext):
     """Обработка YouTube URL"""
     url = message.text.strip()
@@ -392,34 +371,18 @@ async def handle_message(message: types.Message, state: FSMContext):
         reply_markup=keyboard,
         parse_mode=ParseMode.MARKDOWN_V2
     )
-    await state.set_state(TestStates.waiting_for_split)
+    await state.set_state(VideoStates.waiting_for_split)
     await state.update_data(filepath=filepath, original_message_id=message.message_id)
 
 @dp.callback_query()
 async def handle_callback(query: types.CallbackQuery, state: FSMContext):
-    """Обработка callback для тестовых кнопок и разделения"""
+    """Обработка callback для разделения"""
     chat_id = query.message.chat.id
     message_id = query.message.message_id
     await query.answer()
     
     await rate_limiter.wait_if_needed()
-    if query.data == "test_confirm":
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=escape_markdown_v2("✅ *Действие подтверждено!*\n\nТест успешно пройден."),
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        await state.clear()
-    elif query.data == "test_cancel":
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=escape_markdown_v2("❌ *Действие отменено.*\n\nТест завершён."),
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        await state.clear()
-    elif query.data == "cancel":
+    if query.data == "cancel":
         data = await state.get_data()
         filepath = data.get('filepath')
         cleanup_files(filepath)
@@ -504,8 +467,7 @@ async def set_bot_commands():
     """Устанавливаем команды в меню бота"""
     commands = [
         types.BotCommand(command="start", description="Запустить бота"),
-        types.BotCommand(command="help", description="Показать справку"),
-        types.BotCommand(command="test", description="Тестировать инлайн-кнопки")
+        types.BotCommand(command="help", description="Показать справку")
     ]
     await bot.set_my_commands(commands)
     logger.info("Команды меню установлены")
