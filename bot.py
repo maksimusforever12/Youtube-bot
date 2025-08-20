@@ -2,19 +2,24 @@ import os
 import re
 import math
 import logging
+import subprocess
+import json
+import time
+import asyncio
 from typing import Optional, List
 
-import yt_dlp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
 
 # Настройки
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # Используется только для health check
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 CHUNK_SIZE = 1.9 * 1024 * 1024 * 1024  # 1.9 GB для безопасности
 DOWNLOAD_DIR = "downloads"
@@ -30,8 +35,40 @@ logger = logging.getLogger(__name__)
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # Инициализация бота и диспетчера
+storage = MemoryStorage()
 bot = Bot(token=TELEGRAM_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=storage)
+
+# Состояния для FSM
+class VideoStates(StatesGroup):
+    waiting_for_split = State()
+
+# Лимитер запросов (из примера плейлист-бота)
+class TelegramRateLimiter:
+    def __init__(self):
+        self.message_count = 0
+        self.last_minute = int(time.time() // 60)
+        self.messages_per_minute = 0
+        
+    async def wait_if_needed(self):
+        current_minute = int(time.time() // 60)
+        if current_minute > self.last_minute:
+            self.messages_per_minute = 0
+            self.last_minute = current_minute
+        self.message_count += 1
+        self.messages_per_minute += 1
+        if self.messages_per_minute >= 1200:
+            wait_time = 60 - (time.time() % 60)
+            logger.info(f"Достигнут лимит сообщений в минуту. Ожидание {wait_time:.1f} секунд...")
+            await asyncio.sleep(wait_time)
+            self.messages_per_minute = 0
+            self.last_minute = int(time.time() // 60)
+        elif self.message_count % 20 == 0:
+            await asyncio.sleep(1)
+        elif self.message_count % 5 == 0:
+            await asyncio.sleep(0.2)
+
+rate_limiter = TelegramRateLimiter()
 
 def escape_markdown_v2(text: str) -> str:
     """Экранирование зарезервированных символов для MarkdownV2"""
@@ -68,64 +105,99 @@ def format_filesize(size_bytes: int) -> str:
     s = round(size_bytes / p, 2)
     return f"{s} {size_names[i]}"
 
-async def progress_hook(d, status_msg_id, chat_id):
-    """Progress hook для yt-dlp с обновлением сообщения в Telegram"""
-    if d['status'] == 'downloading':
-        try:
-            if 'total_bytes' in d and d['total_bytes']:
-                percent = int(d['downloaded_bytes'] / d['total_bytes'] * 100)
-                if percent % 10 == 0:  # Обновляем каждые 10% для снижения нагрузки
+async def progress_hook(process: subprocess.Popen, status_msg_id: int, chat_id: int):
+    """Progress hook для yt-dlp с обновлением сообщения"""
+    while process.poll() is None:
+        line = process.stdout.readline().strip()
+        if "download" in line.lower():
+            try:
+                percent = float(line.split()[1].strip('%'))
+                if percent % 10 == 0:  # Обновляем каждые 10%
+                    await rate_limiter.wait_if_needed()
                     await bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=status_msg_id,
-                        text=f"📥 Загружено: {percent}%"
+                        text=f"📥 Загружено: {percent:.1f}%"
                     )
-        except Exception as e:
-            logger.error(f"Ошибка обновления прогресса: {e}")
+            except (IndexError, ValueError):
+                pass
+        await asyncio.sleep(0.1)
 
 def get_video_info(url: str) -> Optional[dict]:
-    """Получение информации о видео"""
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-    }
+    """Получение информации о видео через subprocess"""
+    cmd = [
+        "yt-dlp",
+        "--dump-json",
+        "--no-warnings",
+        "--ignore-errors",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "--sleep-requests", "1",
+        "--extractor-retries", "5",
+        "--socket-timeout", "30",
+        url
+    ]
     
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return info
-    except Exception as e:
-        logger.error(f"Ошибка получения информации о видео: {e}")
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=300
+        )
+        if result.returncode != 0:
+            logger.error(f"Ошибка получения информации: {result.stderr.strip()}")
+            return None
+        data_json = json.loads(result.stdout.strip())
+        return data_json
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+        logger.error(f"Ошибка получения информации: {e}")
         return None
 
 async def download_video(url: str, chat_id: int, status_msg_id: int) -> tuple[Optional[str], int]:
-    """Загрузка видео с YouTube"""
+    """Загрузка видео через subprocess"""
     output_template = os.path.join(DOWNLOAD_DIR, f'video_{chat_id}_%(title)s.%(ext)s')
     
-    ydl_opts = {
-        'outtmpl': output_template,
-        'format': 'bestvideo[height>=720][height<=1440]+bestaudio/best[height>=720][height<=1440]/best',
-        'merge_output_format': 'mp4',
-        'writesubtitles': False,
-        'writeautomaticsub': False,
-        'ignoreerrors': False,
-        'progress_hooks': [lambda d: dp.loop.create_task(progress_hook(d, status_msg_id, chat_id))],
-    }
+    cmd = [
+        "yt-dlp",
+        "--output", output_template,
+        "--format", "bestvideo[height>=720][height<=1440]+bestaudio/best[height>=720][height<=1440]/best",
+        "--merge-output-format", "mp4",
+        "--no-warnings",
+        "--ignore-errors",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "--sleep-requests", "1",
+        "--extractor-retries", "5",
+        "--socket-timeout", "30",
+        "--progress", "dot",
+        url
+    ]
     
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-            
-            for file in os.listdir(DOWNLOAD_DIR):
-                if file.startswith(f'video_{chat_id}_') and file.endswith('.mp4'):
-                    filepath = os.path.join(DOWNLOAD_DIR, file)
-                    filesize = os.path.getsize(filepath)
-                    return filepath, filesize
-            
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Запускаем прогресс в отдельной задаче
+        asyncio.create_task(progress_hook(process, status_msg_id, chat_id))
+        
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            logger.error(f"Ошибка загрузки: {stderr}")
             return None, 0
-            
+        
+        for file in os.listdir(DOWNLOAD_DIR):
+            if file.startswith(f'video_{chat_id}_') and file.endswith('.mp4'):
+                filepath = os.path.join(DOWNLOAD_DIR, file)
+                filesize = os.path.getsize(filepath)
+                return filepath, filesize
+        
+        return None, 0
     except Exception as e:
-        logger.error(f"Ошибка загрузки видео: {e}")
+        logger.error(f"Ошибка загрузки: {e}")
         return None, 0
 
 def split_file(filepath: str, chat_id: int) -> List[str]:
@@ -140,17 +212,13 @@ def split_file(filepath: str, chat_id: int) -> List[str]:
                 chunk = f.read(int(CHUNK_SIZE))
                 if not chunk:
                     break
-                
                 part_filename = os.path.join(DOWNLOAD_DIR, f"{base_name}_part{part_num:02d}.mp4")
                 with open(part_filename, "wb") as part_file:
                     part_file.write(chunk)
-                
                 parts.append(part_filename)
                 part_num += 1
-                
         logger.info(f"Файл разделен на {len(parts)} частей")
         return parts
-        
     except Exception as e:
         logger.error(f"Ошибка разделения файла: {e}")
         for part in parts:
@@ -171,6 +239,7 @@ def cleanup_files(*filepaths: str):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     """Команда /start"""
+    await rate_limiter.wait_if_needed()
     welcome_text = (
         "🎬 *YouTube Downloader Bot*\n\n"
         "📋 *Возможности:*\n"
@@ -186,6 +255,7 @@ async def start(message: types.Message):
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
     """Команда /help"""
+    await rate_limiter.wait_if_needed()
     help_text = (
         "🆘 *Помощь*\n\n"
         "*Команды:*\n"
@@ -203,8 +273,9 @@ async def help_cmd(message: types.Message):
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 @dp.message(lambda message: is_youtube_url(message.text.strip()))
-async def handle_message(message: types.Message):
+async def handle_message(message: types.Message, state: FSMContext):
     """Обработка сообщений с YouTube ссылками"""
+    await rate_limiter.wait_if_needed()
     chat_id = message.chat.id
     url = message.text.strip()
     
@@ -214,6 +285,7 @@ async def handle_message(message: types.Message):
     try:
         video_info = get_video_info(url)
         if not video_info:
+            await rate_limiter.wait_if_needed()
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
@@ -234,6 +306,7 @@ async def handle_message(message: types.Message):
             f"⏱️ {format_duration(duration)}\n\n"
             f"🎬 Начинаю загрузку..."
         )
+        await rate_limiter.wait_if_needed()
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg_id,
@@ -244,6 +317,7 @@ async def handle_message(message: types.Message):
         filepath, filesize = await download_video(url, chat_id, status_msg_id)
         
         if not filepath or not os.path.exists(filepath):
+            await rate_limiter.wait_if_needed()
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
@@ -254,6 +328,7 @@ async def handle_message(message: types.Message):
         logger.info(f"Загружен файл: {filepath}, размер: {format_filesize(filesize)}")
         
         if filesize <= MAX_FILE_SIZE:
+            await rate_limiter.wait_if_needed()
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
@@ -261,6 +336,7 @@ async def handle_message(message: types.Message):
             )
             
             with open(filepath, 'rb') as video_file:
+                await rate_limiter.wait_if_needed()
                 await bot.send_document(
                     chat_id=chat_id,
                     document=video_file,
@@ -270,8 +346,8 @@ async def handle_message(message: types.Message):
                 )
             
             cleanup_files(filepath)
+            await rate_limiter.wait_if_needed()
             await bot.delete_message(chat_id=chat_id, message_id=status_msg_id)
-            
         else:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
@@ -280,6 +356,7 @@ async def handle_message(message: types.Message):
                 ]
             ])
             
+            await rate_limiter.wait_if_needed()
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
@@ -293,10 +370,12 @@ async def handle_message(message: types.Message):
                 parse_mode=ParseMode.MARKDOWN_V2
             )
             
-            dp.storage_data[chat_id] = {"filepath": filepath, "title": video_info.get('title', 'video')}
+            await state.update_data(filepath=filepath, title=video_info.get('title', 'video'), status_msg_id=status_msg_id)
+            await state.set_state(VideoStates.waiting_for_split)
     
     except Exception as e:
         logger.error(f"Общая ошибка обработки: {e}")
+        await rate_limiter.wait_if_needed()
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg_id,
@@ -306,11 +385,11 @@ async def handle_message(message: types.Message):
             cleanup_files(filepath)
 
 @dp.callback_query()
-async def handle_split_callback(query: types.CallbackQuery):
+async def handle_split_callback(query: types.CallbackQuery, state: FSMContext):
     """Обработка callback для разделения файла"""
     chat_id = query.message.chat.id
     message_id = query.message.message_id
-    data = dp.storage_data.get(chat_id, {})
+    data = await state.get_data()
     filepath = data.get("filepath")
     title = escape_markdown_v2(data.get("title", "video"))
     
@@ -318,13 +397,16 @@ async def handle_split_callback(query: types.CallbackQuery):
     
     if query.data == "split_yes":
         if not filepath or not os.path.exists(filepath):
+            await rate_limiter.wait_if_needed()
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
                 text="❌ Файл не найден."
             )
+            await state.clear()
             return
         
+        await rate_limiter.wait_if_needed()
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
@@ -335,14 +417,17 @@ async def handle_split_callback(query: types.CallbackQuery):
             parts = split_file(filepath, chat_id)
             
             if not parts:
+                await rate_limiter.wait_if_needed()
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
                     text="❌ Ошибка разделения файла."
                 )
                 cleanup_files(filepath)
+                await state.clear()
                 return
             
+            await rate_limiter.wait_if_needed()
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
@@ -352,6 +437,7 @@ async def handle_split_callback(query: types.CallbackQuery):
             for i, part_path in enumerate(parts, 1):
                 try:
                     with open(part_path, 'rb') as part_file:
+                        await rate_limiter.wait_if_needed()
                         await bot.send_document(
                             chat_id=chat_id,
                             document=part_file,
@@ -364,6 +450,7 @@ async def handle_split_callback(query: types.CallbackQuery):
             
             cleanup_files(filepath, *parts)
             
+            await rate_limiter.wait_if_needed()
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
@@ -373,56 +460,65 @@ async def handle_split_callback(query: types.CallbackQuery):
             
         except Exception as e:
             logger.error(f"Ошибка разделения/отправки: {e}")
+            await rate_limiter.wait_if_needed()
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
                 text=f"❌ Ошибка: {escape_markdown_v2(str(e))}"
             )
             cleanup_files(filepath)
-    
     else:  # split_no
         if filepath:
             cleanup_files(filepath)
+        await rate_limiter.wait_if_needed()
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text="❌ Загрузка отменена."
         )
     
-    dp.storage_data.pop(chat_id, None)
+    await state.clear()
 
-async def on_startup():
-    """Установка webhook при запуске"""
-    webhook_path = f"/{TELEGRAM_TOKEN}"
-    webhook_url = f"{WEBHOOK_URL}{webhook_path}"
-    await bot.set_webhook(url=webhook_url)
-    logger.info(f"🚀 Webhook установлен: {webhook_url}")
+async def health_check(request):
+    """Простой health check для Render.com"""
+    return web.Response(text="Bot is running")
 
-async def on_shutdown():
-    """Очистка при завершении работы"""
-    await bot.delete_webhook()
-    logger.info("🚀 Webhook удален")
+async def start_web_server():
+    """Запускаем простой веб-сервер для Render.com"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    port = int(os.environ.get('PORT', 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"Веб-сервер запущен на порту {port}")
 
-def main():
+async def set_bot_commands():
+    """Устанавливаем команды в меню бота"""
+    commands = [
+        types.BotCommand(command="start", description="Запустить бота"),
+        types.BotCommand(command="help", description="Показать справку")
+    ]
+    await bot.set_my_commands(commands)
+    logger.info("Команды меню установлены")
+
+async def main():
     """Главная функция"""
     if not TELEGRAM_TOKEN:
         logger.error("❌ ОШИБКА: Токен бота не найден в переменной окружения TELEGRAM_TOKEN")
         return
     
-    if not WEBHOOK_URL:
-        logger.error("❌ ОШИБКА: WEBHOOK_URL не установлен в переменных окружения")
-        return
-    
-    app = web.Application()
-    webhook_path = f"/{TELEGRAM_TOKEN}"
-    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=webhook_path)
-    setup_application(app, dp, bot=bot)
-    
-    port = int(os.environ.get('PORT', 8443))
-    logger.info(f"🚀 Запуск сервера на порту {port}...")
-    web.run_app(app, host='0.0.0.0', port=port)
+    try:
+        global rate_limiter
+        rate_limiter = TelegramRateLimiter()
+        await start_web_server()
+        await set_bot_commands()
+        await dp.start_polling(bot, skip_updates=True)
+    except Exception as e:
+        logger.error(f"Ошибка при запуске бота: {e}")
 
 if __name__ == "__main__":
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    main()
+    asyncio.run(main())
