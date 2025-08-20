@@ -101,8 +101,8 @@ async def test_cmd(message: types.Message, state: FSMContext):
     await rate_limiter.wait_if_needed()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton("✅ Подтвердить", callback_data="test_confirm"),
-            InlineKeyboardButton("❌ Отменить", callback_data="test_cancel")
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data="test_confirm"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data="test_cancel")
         ]
     ])
     await message.reply(
