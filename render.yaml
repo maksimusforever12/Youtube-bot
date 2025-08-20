@@ -1,3 +1,4 @@
+```yaml
 services:
   - type: web
     name: youtube-bot
@@ -9,3 +10,4 @@ services:
         sync: false
       - key: PYTHON_VERSION
         value: 3.13.0
+```
