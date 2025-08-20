@@ -166,7 +166,7 @@ async def download_video(url: str, chat_id: int, status_msg_id: int) -> tuple[Op
     cmd = [
         "yt-dlp",
         "--output", output_template,
-        "--format", "bestvideo[height>=720][height<=1440]+bestaudio/best[height>=720][height<=1440]/best",
+        "--format", "bestvideo[height>=1080][height<=1440]+bestaudio/best[height>=1080][height<=1440]/best",
         "--merge-output-format", "mp4",
         "--no-warnings",
         "--ignore-errors",
@@ -247,7 +247,7 @@ async def start(message: types.Message, state: FSMContext):
     welcome_text = escape_markdown_v2(
         "🎬 *YouTube Downloader Bot*\n\n"
         "📋 *Возможности:*\n"
-        "• Скачивание видео в HD/2K качестве\n"
+        "• Скачивание видео в 1080p–2K качестве\n"
         "• Поддержка длинных видео (2+ часа)\n"
         "• Автоматическое разделение больших файлов\n\n"
         "📝 *Как использовать:*\n"
@@ -268,7 +268,7 @@ async def help_cmd(message: types.Message):
         "/start - Запуск бота\n"
         "/help - Эта справка\n\n"
         "*Как скачать видео:*\n"
-        "Отправьте ссылку на YouTube видео. Если размер превысит 2 ГБ, бот предложит разделить файл.\n\n"
+        "Отправьте ссылку на YouTube видео. Видео будет загружено в 1080p–2K качестве. Если размер превысит 2 ГБ, бот предложит разделить файл.\n\n"
         "*Поддерживаемые форматы ссылок:*\n"
         "• youtube.com/watch?v=...\n"
         "• youtu.be/...\n"
@@ -337,15 +337,16 @@ async def handle_message(message: types.Message, state: FSMContext):
         await rate_limiter.wait_if_needed()
         try:
             with open(filepath, 'rb') as video_file:
-                await message.reply_document(
-                    document=types.FSInputFile(filepath),
+                await message.reply_video(
+                    video=types.FSInputFile(filepath),
                     caption=escape_markdown_v2(f"🎥 {title}"),
-                    parse_mode=ParseMode.MARKDOWN_V2
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    duration=duration if duration else None
                 )
             cleanup_files(filepath)
             await bot.delete_message(message.chat.id, status_msg.message_id)
         except Exception as e:
-            logger.error(f"Ошибка отправки файла: {e}")
+            logger.error(f"Ошибка отправки видео: {e}")
             await bot.edit_message_text(
                 chat_id=message.chat.id,
                 message_id=status_msg.message_id,
@@ -428,9 +429,9 @@ async def handle_callback(query: types.CallbackQuery, state: FSMContext):
         for i, part in enumerate(parts, 1):
             try:
                 with open(part, 'rb') as part_file:
-                    await bot.send_document(
+                    await bot.send_video(
                         chat_id=chat_id,
-                        document=types.FSInputFile(part),
+                        video=types.FSInputFile(part),
                         caption=escape_markdown_v2(f"🎥 Часть {i} из {len(parts)}"),
                         parse_mode=ParseMode.MARKDOWN_V2
                     )
@@ -438,9 +439,20 @@ async def handle_callback(query: types.CallbackQuery, state: FSMContext):
                 logger.error(f"Ошибка отправки части {i}: {e}")
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=escape_markdown_v2(f"❌ Ошибка отправки части {i}."),
+                    text=escape_markdown_v2(f"❌ Ошибка отправки части {i}. Попробуйте отправить видео как документ."),
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
+                # Fallback: отправка как документ
+                try:
+                    with open(part, 'rb') as part_file:
+                        await bot.send_document(
+                            chat_id=chat_id,
+                            document=types.FSInputFile(part),
+                            caption=escape_markdown_v2(f"🎥 Часть {i} из {len(parts)} (документ)"),
+                            parse_mode=ParseMode.MARKDOWN_V2
+                        )
+                except Exception as e2:
+                    logger.error(f"Ошибка отправки части {i} как документа: {e2}")
         
         cleanup_files(filepath, *parts)
         await bot.delete_message(chat_id, message_id)
