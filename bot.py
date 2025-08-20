@@ -458,23 +458,6 @@ async def handle_callback(query: types.CallbackQuery, state: FSMContext):
         await bot.delete_message(chat_id, message_id)
         await state.clear()
 
-async def health_check(request):
-    """Простой health check для Render.com"""
-    return web.Response(text="Bot is running")
-
-async def start_web_server():
-    """Запускаем простой веб-сервер для Render.com"""
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)
-    
-    port = int(os.environ.get('PORT', 8080))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logger.info(f"Веб-сервер запущен на порту {port}")
-
 async def set_bot_commands():
     """Устанавливаем команды в меню бота"""
     commands = [
@@ -493,7 +476,6 @@ async def main():
     try:
         global rate_limiter
         rate_limiter = TelegramRateLimiter()
-        await start_web_server()
         await set_bot_commands()
         await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
