@@ -1,9 +1,11 @@
 services:
   - type: web
-    name: telegram-bot
-    runtime: python3
+    name: youtube-bot
+    runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
-      - key: TOKEN
+      - key: TELEGRAM_TOKEN
         sync: false
+      - key: PYTHON_VERSION
+        value: 3.13.0
