@@ -439,7 +439,7 @@ async def handle_callback(query: types.CallbackQuery, state: FSMContext):
                 logger.error(f"Ошибка отправки части {i}: {e}")
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=escape_markdown_v2(f"❌ Ошибка отправки части {i}. Попробуйте отправить видео как документ."),
+                    text=escape_markdown_v2(f"❌ Ошибка отправки части {i}."),
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
                 # Fallback: отправка как документ
@@ -453,7 +453,7 @@ async def handle_callback(query: types.CallbackQuery, state: FSMContext):
                         )
                 except Exception as e2:
                     logger.error(f"Ошибка отправки части {i} как документа: {e2}")
-        
+
         cleanup_files(filepath, *parts)
         await bot.delete_message(chat_id, message_id)
         await state.clear()
