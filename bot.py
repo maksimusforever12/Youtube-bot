@@ -69,6 +69,16 @@ class TelegramRateLimiter:
 
 rate_limiter = TelegramRateLimiter()
 
+def check_dependencies() -> bool:
+    """Проверка наличия yt-dlp и ffmpeg"""
+    try:
+        subprocess.run(["yt-dlp", "--version"], capture_output=True, check=True)
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logger.error(f"Ошибка зависимостей: {e}. Убедитесь, что yt-dlp и ffmpeg установлены и добавлены в PATH.")
+        return False
+
 def escape_markdown_v2(text: str) -> str:
     """Экранирование зарезервированных символов для MarkdownV2"""
     if not isinstance(text, str):
@@ -130,6 +140,9 @@ async def progress_hook(process: subprocess.Popen, status_msg_id: int, chat_id: 
 
 def get_video_info(url: str) -> Optional[dict]:
     """Получение информации о видео через subprocess"""
+    if not check_dependencies():
+        return None
+    
     cmd = [
         "yt-dlp",
         "--dump-json",
@@ -138,9 +151,11 @@ def get_video_info(url: str) -> Optional[dict]:
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "--sleep-requests", "1",
         "--extractor-retries", "5",
-        "--socket-timeout", "30",
-        url
+        "--socket-timeout", "30"
     ]
+    if os.path.exists("cookies.txt"):
+        cmd.extend(["--cookies", "cookies.txt"])
+    cmd.append(url)
     
     try:
         result = subprocess.run(
@@ -155,12 +170,15 @@ def get_video_info(url: str) -> Optional[dict]:
             return None
         data_json = json.loads(result.stdout.strip())
         return data_json
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
         logger.error(f"Ошибка получения информации: {e}")
         return None
 
 async def download_video(url: str, chat_id: int, status_msg_id: int) -> tuple[Optional[str], int]:
     """Загрузка видео через subprocess"""
+    if not check_dependencies():
+        return None, 0
+    
     output_template = os.path.join(DOWNLOAD_DIR, f'video_{chat_id}_%(title)s.%(ext)s')
     
     cmd = [
@@ -174,9 +192,11 @@ async def download_video(url: str, chat_id: int, status_msg_id: int) -> tuple[Op
         "--sleep-requests", "1",
         "--extractor-retries", "5",
         "--socket-timeout", "30",
-        "--progress", "dot",
-        url
+        "--progress", "dot"
     ]
+    if os.path.exists("cookies.txt"):
+        cmd.extend(["--cookies", "cookies.txt"])
+    cmd.append(url)
     
     try:
         process = subprocess.Popen(
@@ -294,13 +314,23 @@ async def handle_message(message: types.Message, state: FSMContext):
         parse_mode=ParseMode.MARKDOWN_V2
     )
     
+    if not check_dependencies():
+        await rate_limiter.wait_if_needed()
+        await bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=status_msg.message_id,
+            text=escape_markdown_v2("❌ Ошибка: yt-dlp или ffmpeg не установлены. Установите их и добавьте в PATH."),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+    
     video_info = get_video_info(url)
     if not video_info:
         await rate_limiter.wait_if_needed()
         await bot.edit_message_text(
             chat_id=message.chat.id,
             message_id=status_msg.message_id,
-            text=escape_markdown_v2("❌ Не удалось получить информацию о видео. Попробуйте другую ссылку."),
+            text=escape_markdown_v2("❌ Не удалось получить информацию о видео. Попробуйте другую ссылку или проверьте cookies.txt."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
@@ -471,6 +501,10 @@ async def main():
     """Главная функция"""
     if not TELEGRAM_TOKEN:
         logger.error("❌ ОШИБКА: Токен бота не найден в переменной окружения TELEGRAM_TOKEN")
+        return
+    
+    if not check_dependencies():
+        logger.error("❌ ОШИБКА: Не установлены yt-dlp или ffmpeg. Установите их и добавьте в PATH.")
         return
     
     try:
