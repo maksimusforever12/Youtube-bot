@@ -244,16 +244,16 @@ def cleanup_files(*filepaths: str):
 async def start(message: types.Message, state: FSMContext):
     """Команда /start"""
     await rate_limiter.wait_if_needed()
-    welcome_text = (
+    welcome_text = escape_markdown_v2(
         "🎬 *YouTube Downloader Bot*\n\n"
         "📋 *Возможности:*\n"
         "• Скачивание видео в HD/2K качестве\n"
-        "• Поддержка длинных видео \\(2+ часа\\)\n"
+        "• Поддержка длинных видео (2+ часа)\n"
         "• Автоматическое разделение больших файлов\n\n"
         "📝 *Как использовать:*\n"
         "Отправьте ссылку на YouTube видео или используйте команды:\n"
-        "/start \\- Начать работу\n"
-        "/help \\- Показать справку"
+        "/start - Начать работу\n"
+        "/help - Показать справку"
     )
     await message.reply(welcome_text, parse_mode=ParseMode.MARKDOWN_V2)
     await state.set_state(VideoStates.waiting_for_url)
@@ -262,17 +262,17 @@ async def start(message: types.Message, state: FSMContext):
 async def help_cmd(message: types.Message):
     """Команда /help"""
     await rate_limiter.wait_if_needed()
-    help_text = (
+    help_text = escape_markdown_v2(
         "🆘 *Помощь*\n\n"
         "*Команды:*\n"
-        "/start \\- Запуск бота\n"
-        "/help \\- Эта справка\n\n"
+        "/start - Запуск бота\n"
+        "/help - Эта справка\n\n"
         "*Как скачать видео:*\n"
-        "Отправьте ссылку на YouTube видео\\. Если размер превысит 2 ГБ, бот предложит разделить файл\\.\n\n"
+        "Отправьте ссылку на YouTube видео. Если размер превысит 2 ГБ, бот предложит разделить файл.\n\n"
         "*Поддерживаемые форматы ссылок:*\n"
-        "• youtube\\.com/watch?v=...\n"
-        "• youtu\\.be/...\n"
-        "• m\\.youtube\\.com/..."
+        "• youtube.com/watch?v=...\n"
+        "• youtu.be/...\n"
+        "• m.youtube.com/..."
     )
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
